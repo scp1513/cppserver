@@ -7,7 +7,6 @@
 
 namespace mysql
 {
-	////////////////////////////////////////////////////////////////////////////
 	// SQLBuilder, not orm
 	class SQLBuilder
 	{
@@ -20,7 +19,7 @@ namespace mysql
 			ss.str("");
 			print_VALUES = false;
 			print_END = false;
-			first_SET = true;
+			first_CALLPARA = false;
 		}
 
 		std::string str()
@@ -149,14 +148,28 @@ namespace mysql
 		}
 
 		template <typename T0, typename... T>
-		SQLBuilder& AppendParams(const T0& t0, T... t)
+		SQLBuilder& AppendSet(const std::string& field, const T0& t0, T... t)
 		{
-			ss << ",";
+			ss << "," << field << "=";
 			PutVal(t0);
-			return AppendParams(t...);
+			return AppendSet(t...);
 		}
 
-		SQLBuilder& AppendParams()
+		SQLBuilder& AppendSet()
+		{
+			return *this;
+		}
+
+		template <typename T0, typename... T>
+		SQLBuilder& AppendCall(const T0& t0, T... t)
+		{
+			if (!first_CALLPARA) ss << ",";
+			else  first_CALLPARA = false;
+			PutVal(t0);
+			return AppendCall(t...);
+		}
+
+		SQLBuilder& AppendCall()
 		{
 			ss << ")";
 			return *this;
@@ -218,18 +231,16 @@ namespace mysql
 		SQLBuilder& Update(const std::string& table)
 		{
 			reset();
-			ss << "UPDATE " << table << " SET ";
+			ss << "UPDATE " << table;
 			return *this;
 		}
 
-		template <typename T>
-		SQLBuilder& Set(const std::string& field, const T& val)
+		template <typename T0, typename... T>
+		SQLBuilder& Set(const std::string& field, const T0& val, T... t)
 		{
-			if (first_SET) { first_SET = false; }
-			else { ss << ","; }
-			ss << field << "=";
+			ss << " SET " << field << "=";
 			PutVal(val);
-			return *this;
+			return AppendSet(t...);
 		}
 
 		SQLBuilder& Delete(const std::string& table)
@@ -240,21 +251,22 @@ namespace mysql
 		}
 
 		SQLBuilder& Where(const std::string& field) { ss << " WHERE " << field; return *this; }
-		SQLBuilder& Where() { ss << " WHERE"; return *this; }
 		SQLBuilder& And(const std::string& field) { ss << " AND " << field; return *this; }
-		SQLBuilder& And() { ss << " AND"; return *this; }
 		SQLBuilder& Or(const std::string& field) { ss << " OR " << field; return *this; }
+		SQLBuilder& Where() { ss << " WHERE"; return *this; }
+		SQLBuilder& And() { ss << " AND"; return *this; }
 		SQLBuilder& Or() { ss << " OR"; return *this; }
 
-		template <typename T>
-		SQLBuilder& In(const std::vector<T>& vals)
+		template <typename Container>
+		SQLBuilder& In(const Container& vals)
 		{
 			ss << " IN(";
 			int n = 0;
-			for (size_t i = 0; i < vals.size(); i++)
+			for (auto& v : vals)
 			{
 				if (n != 0) ss << ",";
-				PutVal(vals[i]);
+				++n;
+				PutVal(v);
 			}
 			ss << ")";
 			return *this;
@@ -298,33 +310,15 @@ namespace mysql
 			ss << " LIMIT " << l1 << "," << l2;
 		}
 
-	#define DECL_SAMPLE_OPERATOR(fn, op) template<typename T> SQLBuilder& fn(const T& v) { ss << op; PutVal(v); return *this; }
-
-		DECL_SAMPLE_OPERATOR(Equal, "=")
-		DECL_SAMPLE_OPERATOR(NotEqual, "!=")
-		DECL_SAMPLE_OPERATOR(Less, "<")
-		DECL_SAMPLE_OPERATOR(LessEqual, "<=")
-		DECL_SAMPLE_OPERATOR(Bigger, ">")
-		DECL_SAMPLE_OPERATOR(BiggerEqual, ">=")
-
-	#undef DECL_SAMPLE_OPERATOR
-
-		template <typename T>
-		SQLBuilder& IsNull(const T& t)
-		{
-			ss << " ISNULL(" << t << ")";
-			return *this;
-		}
-		SQLBuilder& IsNull()
-		{
-			ss << " IS NULL";
-			return *this;
-		}
-		SQLBuilder& IsNotNull()
-		{
-			ss << " IS NOT NULL";
-			return *this;
-		}
+		template<typename T> SQLBuilder& Equal(const T& v) { ss << "="; PutVal(v); return *this; }
+		template<typename T> SQLBuilder& NotEqual(const T& v) { ss << "!="; PutVal(v); return *this; }
+		template<typename T> SQLBuilder& Less(const T& v) { ss << "<"; PutVal(v); return *this; }
+		template<typename T> SQLBuilder& LessEqual(const T& v) { ss << "<="; PutVal(v); return *this; }
+		template<typename T> SQLBuilder& Bigger(const T& v) { ss << ">="; PutVal(v); return *this; }
+		template<typename T> SQLBuilder& BiggerEqual(const T& v) { ss << ">="; PutVal(v); return *this; }
+		template<typename T> SQLBuilder& IsNull(const T& t) { ss << " ISNULL(" << t << ")"; return *this; }
+		SQLBuilder& IsNull() { ss << " IS NULL"; return *this; }
+		SQLBuilder& IsNotNull() { ss << " IS NOT NULL"; return *this; }
 
 		template <typename T>
 		SQLBuilder& IfNull(const std::string& field, const T& v)
@@ -334,27 +328,21 @@ namespace mysql
 			return *this;
 		}
 
-		SQLBuilder& Call(const std::string& p)
+		template <typename... T>
+		SQLBuilder& Call(const std::string& p, T... t)
 		{
 			reset();
-			ss << "CALL " << p;
-			return *this;
-		}
-
-		template <typename T0, typename... T>
-		SQLBuilder& Params(const T0& t0, T... t)
-		{
-			ss << "(";
-			PutVal(t0);
-			return AppendParams(t...);
+			ss << "CALL " << p << "(";
+			first_CALLPARA = true;
+			return AppendCall(t...);
 		}
 
 	private:
 		std::stringstream ss;
 		bool print_VALUES;
 		bool print_END;
-		bool first_SET;
+		bool first_CALLPARA;
 	};
-
 }
+
 #endif

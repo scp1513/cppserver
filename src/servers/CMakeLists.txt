@@ -1,0 +1,8 @@
+add_subdirectory(def)
+add_subdirectory(proto)
+add_subdirectory(common)
+add_subdirectory(ws)
+add_subdirectory(dp)
+add_subdirectory(ls)
+add_subdirectory(fep)
+add_subdirectory(ss)

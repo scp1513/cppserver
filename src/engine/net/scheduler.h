@@ -14,8 +14,6 @@ namespace net
 		friend class TCPClient;
 		friend class TCPServer;
 
-		struct Core;
-
 		Scheduler();
 	public:
 		~Scheduler();
@@ -31,6 +29,7 @@ namespace net
 		Serial& GetSerial();
 
 	private:
+		struct Core;
 		std::shared_ptr<Core> mCore;
 	};
 }

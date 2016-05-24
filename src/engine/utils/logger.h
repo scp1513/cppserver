@@ -3,11 +3,11 @@
 
 #include <iostream>
 
-#define LOG_TRACE(logger, MSG) std::cout << "TRAC: " << MSG << std::endl;
-#define LOG_DEBUG(logger, MSG) std::cout << "DEBG: " << MSG << std::endl;
-#define LOG_INFO(logger, MSG)  std::cout << "INFO: " << MSG << std::endl;
-#define LOG_WARN(logger, MSG)  std::cout << "WARN: " << MSG << std::endl;
-#define LOG_ERROR(logger, MSG) std::cout << "EROR: " << MSG << std::endl;
-#define LOG_FATAL(logger, MSG) std::cout << "FATL: " << MSG << std::endl;
+#define LOG_TRACE(logger, MSG) do { std::cout << "TRAC: " << MSG << std::endl; } while(false)
+#define LOG_DEBUG(logger, MSG) do { std::cout << "DEBG: " << MSG << std::endl; } while(false)
+#define LOG_INFO(logger, MSG)  do { std::cout << "INFO: " << MSG << std::endl; } while(false)
+#define LOG_WARN(logger, MSG)  do { std::cout << "WARN: " << MSG << std::endl; } while(false)
+#define LOG_ERROR(logger, MSG) do { std::cout << "EROR: " << MSG << std::endl; } while(false)
+#define LOG_FATAL(logger, MSG) do { std::cout << "FATL: " << MSG << std::endl; } while(false)
 
 #endif

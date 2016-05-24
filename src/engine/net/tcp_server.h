@@ -11,8 +11,6 @@ namespace net
 	class TCPServer
 	{
 	public:
-		struct Core;
-
 		typedef std::function<void(uint)>                      OnConnectedHandler;
 		typedef std::function<void(uint)>                      OnCloseHandler;
 		typedef std::function<void(uint, const void*, size_t)> OnRecvHandler;
@@ -47,6 +45,7 @@ namespace net
 		uint GetRecvBufSize();
 
 	private:
+		struct Core;
 		std::shared_ptr<Core> mCore;
 	};
 }

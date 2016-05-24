@@ -33,11 +33,13 @@
 #include <asio/system_timer.hpp>
 
 using namespace asio;
+using namespace std::chrono;
+using namespace std::placeholders;
 
 struct TimerInfo
 {
 	uint timerID;
-	uint millisec;
+	system_clock::duration duration;
 	system_timer timer;
 
 	TimerInfo(io_service& service) : timer(service) {}
@@ -61,24 +63,13 @@ struct Serial::Core
 	Core() : working(false), timerIDCounter(0) {}
 };
 
-static void _ThreadHandler(io_service* service)
-{
-	service->run();
-}
-
-static void _PostHandler()
-{
-
-}
-
 static void _TimerHandler(TimerInfoPtr timerInfo, const Serial::TimerHandler& handler, const asio::error_code& err)
 {
-	using namespace std::chrono;
 	if (err) return; // already cancel
 	handler(timerInfo->timerID);
-	auto t = timerInfo->timer.expires_at() + milliseconds(timerInfo->millisec);
+	auto t = timerInfo->timer.expires_at() + timerInfo->duration;
 	timerInfo->timer.expires_at(t);
-	timerInfo->timer.async_wait(std::bind(_TimerHandler, timerInfo, handler, std::placeholders::_1));
+	timerInfo->timer.async_wait(std::bind(_TimerHandler, timerInfo, handler, _1));
 }
 
 static void _ExpireHandler(TimerInfoPtr timerInfo, const Serial::TimerHandler& handler, Serial* serial, const asio::error_code& err)
@@ -101,24 +92,23 @@ void Serial::Start()
 {
 	mCore->working = true;
 	mCore->serviceWork.reset(new io_service::work(mCore->service));
-	mCore->thread.swap(std::thread(std::bind(_ThreadHandler, &mCore->service)));
+	mCore->thread.swap(std::thread([&]() { mCore->service.run(); }));
 }
 
 void Serial::Stop()
 {
-	//Post([&]()
-	//{
+	{
 		std::lock_guard<std::mutex> guard(mCore->mutex);
 		mCore->working = false;
 		for (auto& kv : mCore->timerInfos)
 		{
 			kv.second->timer.cancel();
 		}
-		mCore->serviceWork.reset();
-		mCore->service.stop();
-		if (mCore->thread.joinable())
-			mCore->thread.join();
-	//});
+	}
+	mCore->serviceWork.reset();
+	mCore->service.stop();
+	if (mCore->thread.joinable())
+		mCore->thread.join();
 }
 
 void Serial::Post(const PostHandler& handler)
@@ -127,15 +117,14 @@ void Serial::Post(const PostHandler& handler)
 	mCore->service.post(handler);
 }
 
-uint Serial::AddTimer(uint millisec, const TimerHandler& handler)
+uint Serial::AddTimer(const std::chrono::system_clock::duration& duration, const TimerHandler& handler)
 {
-	using namespace std::chrono;
 	if (handler == nullptr) return 0;
 
-	auto eventTime = system_clock::now() + milliseconds(millisec);
+	auto eventTime = system_clock::now() + duration;
 
 	TimerInfoPtr timerInfo(new TimerInfo(mCore->service));
-	timerInfo->millisec = millisec;
+	timerInfo->duration = duration;
 
 	{
 		std::lock_guard<std::mutex> guard(mCore->mutex);
@@ -144,22 +133,16 @@ uint Serial::AddTimer(uint millisec, const TimerHandler& handler)
 	}
 
 	timerInfo->timer.expires_at(eventTime);
-	timerInfo->timer.async_wait(std::bind(_TimerHandler, timerInfo, handler, std::placeholders::_1));
+	timerInfo->timer.async_wait(std::bind(_TimerHandler, timerInfo, handler, _1));
 	return timerInfo->timerID;
-}
-
-uint Serial::AddTimer(const std::chrono::system_clock::duration& duration, const TimerHandler& handler)
-{
-	return AddTimer((uint)(duration.count() / 1000000), handler);
 }
 
 uint Serial::Expire(const std::chrono::system_clock::duration& duration, const TimerHandler& handler)
 {
-	using namespace std::chrono;
 	if (handler == nullptr) return 0;
 
 	TimerInfoPtr timerInfo(new TimerInfo(mCore->service));
-	timerInfo->millisec = uint(duration.count() / 1000000);
+	timerInfo->duration = duration;
 	timerInfo->timer.expires_from_now(duration);
 
 	{
@@ -168,55 +151,26 @@ uint Serial::Expire(const std::chrono::system_clock::duration& duration, const T
 		mCore->timerInfos[timerInfo->timerID] = timerInfo;
 	}
 
-	timerInfo->timer.async_wait(std::bind(_ExpireHandler, timerInfo, handler, this, std::placeholders::_1));
+	timerInfo->timer.async_wait(std::bind(_ExpireHandler, timerInfo, handler, this, _1));
 	return timerInfo->timerID;
-}
-
-uint Serial::Expire(uint millisec, const TimerHandler& handler)
-{
-	return Expire(std::chrono::milliseconds(millisec), handler);
 }
 
 uint Serial::ExpireAt(const std::chrono::system_clock::time_point& time, const TimerHandler& handler)
 {
-	auto now = std::chrono::system_clock::now();
+	auto now = system_clock::now();
 	if (time < now) return 0;
-	uint millisec = (uint)((time - now).count() / 1000000);
-	return Expire(millisec, handler);
-}
-
-uint Serial::ExpireAt(const std::tm& tm, const TimerHandler& handler)
-{
-	std::tm tmp = tm;
-	auto now = std::chrono::system_clock::now();
-	auto time = std::chrono::system_clock::from_time_t(std::mktime(&tmp));
-	if (time < now) return 0;
-	uint millisec = (uint)((time - now).count() / 1000000);
-	return Expire(millisec, handler);
-}
-
-uint Serial::ExpireAt(const std::time_t& t, const TimerHandler& handler)
-{
-	auto now = std::chrono::system_clock::now();
-	auto time = std::chrono::system_clock::from_time_t(t);
-	if (time < now) return 0;
-	uint millisec = (uint)((time - now).count() / 1000000);
-	return Expire(millisec, handler);
+	return Expire(time - now, handler);
 }
 
 void Serial::RemoveTimer(uint index)
 {
-	auto handler = [&, index]()
+	TimerInfoPtr timerInfo;
 	{
-		TimerInfoPtr timerInfo;
-		{
-			std::lock_guard<std::mutex> guard(mCore->mutex);
-			auto iter = mCore->timerInfos.find(index);
-			if (iter == mCore->timerInfos.end()) return;
-			timerInfo = iter->second;
-			mCore->timerInfos.erase(iter);
-		}
-		timerInfo->timer.cancel();
-	};
-	Post(handler);
+		std::lock_guard<std::mutex> guard(mCore->mutex);
+		auto iter = mCore->timerInfos.find(index);
+		if (iter == mCore->timerInfos.end()) return;
+		timerInfo = iter->second;
+		mCore->timerInfos.erase(iter);
+	}
+	timerInfo->timer.cancel();
 }

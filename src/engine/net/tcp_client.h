@@ -14,8 +14,6 @@ namespace net
 		friend class utils::Singleton<TCPClient>;
 		TCPClient();
 
-		struct Core;
-
 	public:
 		enum class Result
 		{
@@ -55,6 +53,7 @@ namespace net
 		uint GetRecvBufSize();
 
 	private:
+		struct Core;
 		std::shared_ptr<Core> mCore;
 	};
 }

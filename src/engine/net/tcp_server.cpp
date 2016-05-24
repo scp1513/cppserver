@@ -11,16 +11,40 @@ using namespace asio;
 using namespace asio::ip;
 using namespace std::placeholders;
 
+typedef TCPServer::OnConnectedHandler OnConnectedHandler;
+typedef TCPServer::OnCloseHandler     OnCloseHandler;
+typedef TCPServer::OnRecvHandler      OnRecvHandler;
+
+/////////////////////////////////////////////////////////////////////////////
+struct CoreShare
+{
+	Serial& serial;
+
+	OnConnectedHandler onConnectedHandler;
+	OnCloseHandler     onCloseHandler;
+	OnRecvHandler      onRecvHandler;
+
+	bool tcp_nodelay;
+	uint send_buffer_size;
+	uint recv_buffer_size;
+
+	std::function<bool(uint)> Close;
+
+	CoreShare(Serial& serial)
+		: serial(serial)
+		, tcp_nodelay(false)
+		, send_buffer_size(32 * 1024)
+		, recv_buffer_size(16 * 1024)
+	{}
+};
+
 /////////////////////////////////////////////////////////////////////////////
 class TCPServerSession : public std::enable_shared_from_this<TCPServerSession>
 {
 public:
 	typedef std::shared_ptr<TCPServerSession> Ptr;
-	typedef TCPServer::OnConnectedHandler  OnConnectedHandler;
-	typedef TCPServer::OnCloseHandler      OnCloseHandler;
-	typedef TCPServer::OnRecvHandler       OnRecvHandler;
 
-	TCPServerSession(TCPServer::Core* core, uint connID, io_service& service);
+	TCPServerSession(CoreShare& core, uint connID, io_service& service);
 	~TCPServerSession() {}
 	tcp::socket& GetSocket() { return mSocket; }
 	uint GetConnID() { return mConnID; }
@@ -35,7 +59,7 @@ private:
 	void packet_handler(char* buf, uint length);
 
 private:
-	TCPServer::Core*  mCore;
+	CoreShare&        mCore;
 	uint              mConnID;
 	tcp::socket       mSocket;
 	std::vector<byte> mBuffer;
@@ -44,19 +68,12 @@ private:
 /////////////////////////////////////////////////////////////////////////////
 struct TCPServer::Core
 {
-	Serial& serial;
-	io_service& service;
+	CoreShare share;
 
-	OnConnectedHandler onConnectedHandler;
-	OnCloseHandler     onCloseHandler;
-	OnRecvHandler      onRecvHandler;
+	io_service& service;
 
 	std::string ip;
 	int         port;
-
-	bool tcp_nodelay;
-	uint send_buffer_size;
-	uint recv_buffer_size;
 
 	uint idCounter;
 	std::mutex mutex;
@@ -66,120 +83,25 @@ struct TCPServer::Core
 	tcp::endpoint endpoint_;
 
 	Core(Serial& serial, io_service& service)
-		: serial(serial)
+		: share(serial)
 		, service(service)
 		, port(0)
-		, tcp_nodelay(true)
-		, send_buffer_size(32 * 1024)
-		, recv_buffer_size(16 * 1024)
 		, idCounter(0)
-	{}
+	{
+		share.Close = std::bind(&Core::Close, this, _1);
+	}
 
-	uint GetConnCount();
-	std::string GetIPAddr(uint connID);
-	bool Start();
-	void Stop();
-	size_t Send(uint connID, const void* data, size_t len);
-	bool Close(uint connID);
 	bool StartAccept();
 	void HandleAccept(TCPServerSession::Ptr session, std::error_code ec);
+	bool Close(uint connID);
 };
 
 /////////////////////////////////////////////////////////////////////////////
-uint TCPServer::Core::GetConnCount()
-{
-	std::lock_guard<std::mutex> guard(mutex);
-	return sessions.size();
-}
-
-std::string TCPServer::Core::GetIPAddr(uint connID)
-{
-	try
-	{
-		std::lock_guard<std::mutex> guard(mutex);
-		auto iter = sessions.find(connID);
-		if (iter == sessions.end()) return std::string();
-		return iter->second->GetSocket().remote_endpoint().address().to_string();
-	}
-	catch (...)
-	{
-		return std::string();
-	}
-}
-
-bool TCPServer::Core::Start()
-{
-	try
-	{
-		acceptor_.reset(new tcp::acceptor(service, endpoint_));
-
-		//acceptor_->set_option(tcp::acceptor::reuse_address(false));
-		//acceptor_->bind(endpoint_);
-		//acceptor_->listen();
-
-		return StartAccept();
-	}
-	catch (...)
-	{
-		return false;
-	}
-	return false;
-}
-
-void TCPServer::Core::Stop()
-{
-	try
-	{
-		std::lock_guard<std::mutex> guard(mutex);
-		acceptor_->cancel();
-		for (auto & pair : sessions)
-		{
-			pair.second->Close();
-		}
-	}
-	catch (...)
-	{
-	}
-}
-
-size_t TCPServer::Core::Send(uint connID, const void* data, size_t len)
-{
-	try
-	{
-		std::lock_guard<std::mutex> guard(mutex);
-		auto iter = sessions.find(connID);
-		if (iter == sessions.end()) return 0;
-		return iter->second->Send(data, len);
-	}
-	catch (...)
-	{
-		return 0;
-	}
-}
-
-bool TCPServer::Core::Close(uint connID)
-{
-	try
-	{
-		std::lock_guard<std::mutex> guard(mutex);
-		auto iter = sessions.find(connID);
-		if (iter == sessions.end()) return false;
-		iter->second->Close();
-		sessions.erase(iter);
-		serial.Post(std::bind(onCloseHandler, connID));
-		return true;
-	}
-	catch (...)
-	{
-		return false;
-	}
-}
-
 bool TCPServer::Core::StartAccept()
 {
 	try
 	{
-		TCPServerSession::Ptr session(new TCPServerSession(this, ++idCounter, service));
+		TCPServerSession::Ptr session(new TCPServerSession(share, ++idCounter, service));
 		auto& socket = session->GetSocket();
 		auto handler = std::bind(&Core::HandleAccept, this, session, _1);
 		acceptor_->async_accept(socket, handler);
@@ -202,7 +124,7 @@ void TCPServer::Core::HandleAccept(TCPServerSession::Ptr session, std::error_cod
 		}
 		if (insertSuccess)
 		{
-			serial.Post(std::bind(onConnectedHandler, session->GetConnID()));
+			share.serial.Post(std::bind(share.onConnectedHandler, session->GetConnID()));
 			session->Start();
 		}
 	}
@@ -210,9 +132,27 @@ void TCPServer::Core::HandleAccept(TCPServerSession::Ptr session, std::error_cod
 	StartAccept();
 }
 
+bool TCPServer::Core::Close(uint connID)
+{
+	try
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		auto iter = sessions.find(connID);
+		if (iter == sessions.end()) return false;
+		iter->second->Close();
+		sessions.erase(iter);
+		share.serial.Post(std::bind(share.onCloseHandler, connID));
+		return true;
+	}
+	catch (...)
+	{
+		return false;
+	}
+}
+
 /////////////////////////////////////////////////////////////////////////////
 
-TCPServerSession::TCPServerSession(TCPServer::Core* core, uint connID, io_service & service)
+TCPServerSession::TCPServerSession(CoreShare& core, uint connID, io_service & service)
 	: mCore(core)
 	, mConnID(connID)
 	, mSocket(service)
@@ -223,10 +163,10 @@ inline void TCPServerSession::Start()
 {
 	mBuffer.resize(sizeof(uint16));
 
-	mSocket.set_option(tcp::no_delay(mCore->tcp_nodelay));
+	mSocket.set_option(tcp::no_delay(mCore.tcp_nodelay));
 	mSocket.set_option(tcp::socket::keep_alive(false));
-	mSocket.set_option(tcp::socket::send_buffer_size(mCore->send_buffer_size));
-	mSocket.set_option(tcp::socket::receive_buffer_size(mCore->recv_buffer_size));
+	mSocket.set_option(tcp::socket::send_buffer_size(mCore.send_buffer_size));
+	mSocket.set_option(tcp::socket::receive_buffer_size(mCore.recv_buffer_size));
 
 	recv_len();
 }
@@ -299,7 +239,7 @@ inline void TCPServerSession::handle_recv_len(std::error_code ec, std::size_t by
 		default:
 			break;
 		}
-		mCore->Close(GetConnID());
+		mCore.Close(GetConnID());
 		return;
 	}
 
@@ -339,7 +279,7 @@ inline void TCPServerSession::handle_recv_body(std::error_code ec, std::size_t b
 		default:
 			break;
 		}
-		mCore->Close(GetConnID());
+		mCore.Close(GetConnID());
 		return;
 	}
 
@@ -347,7 +287,7 @@ inline void TCPServerSession::handle_recv_body(std::error_code ec, std::size_t b
 	{
 		char* packet = new char[bytes];
 		memcpy(packet, &mBuffer[0], bytes);
-		mCore->serial.Post(std::bind(&TCPServerSession::packet_handler, shared_from_this(), packet, bytes));
+		mCore.serial.Post(std::bind(&TCPServerSession::packet_handler, shared_from_this(), packet, bytes));
 	}
 	catch (...)
 	{
@@ -362,7 +302,7 @@ inline void TCPServerSession::packet_handler(char * buf, uint length)
 
 	if (label == 24)
 	{
-		mCore->onRecvHandler(GetConnID(), buf + 2, length - 2);
+		mCore.onRecvHandler(GetConnID(), buf + 2, length - 2);
 	}
 	else
 	{
@@ -381,7 +321,7 @@ inline void TCPServerSession::packet_handler(char * buf, uint length)
 			if (index + 2 + singleLen > length)
 				return;
 
-			mCore->onRecvHandler(GetConnID(), &buf[index + 2], singleLen);
+			mCore.onRecvHandler(GetConnID(), &buf[index + 2], singleLen);
 			index += 2 + singleLen;
 		}
 	}
@@ -398,47 +338,119 @@ TCPServer::TCPServer(const Params& params)
 	mCore.reset(new Core(serial, service));
 	mCore->ip = params.ip;
 	mCore->port = params.port;
-	mCore->onConnectedHandler = params.onconnected_handler;
-	mCore->onRecvHandler = params.onrecv_handler;
-	mCore->onCloseHandler = params.onclose_handler;
+	mCore->share.onConnectedHandler = params.onconnected_handler;
+	mCore->share.onRecvHandler = params.onrecv_handler;
+	mCore->share.onCloseHandler = params.onclose_handler;
 
 	mCore->endpoint_ = tcp::endpoint(address::from_string(params.ip), params.port);
 }
 
-TCPServer::~TCPServer() {}
-uint TCPServer::GetConnCount() const { return mCore->GetConnCount(); }
-std::string TCPServer::GetIPAddr(uint connID) { return mCore->GetIPAddr(connID); }
-bool TCPServer::Start() { return mCore->Start(); }
-void TCPServer::Stop() { mCore->Stop(); }
-int TCPServer::Send(uint conn_index, const void *data_ptr, size_t data_len) { return mCore->Send(conn_index, data_ptr, data_len); }
-bool TCPServer::Close(uint connID) { return mCore->Close(connID); }
+TCPServer::~TCPServer()
+{
+}
+
+uint TCPServer::GetConnCount() const
+{
+	std::lock_guard<std::mutex> guard(mCore->mutex);
+	return mCore->sessions.size();
+}
+
+std::string TCPServer::GetIPAddr(uint connID)
+{
+	try
+	{
+		std::lock_guard<std::mutex> guard(mCore->mutex);
+		auto iter = mCore->sessions.find(connID);
+		if (iter == mCore->sessions.end()) return std::string();
+		return iter->second->GetSocket().remote_endpoint().address().to_string();
+	}
+	catch (...)
+	{
+		return std::string();
+	}
+}
+
+bool TCPServer::Start()
+{
+	try
+	{
+		mCore->acceptor_.reset(new tcp::acceptor(mCore->service, mCore->endpoint_));
+
+		//acceptor_->set_option(tcp::acceptor::reuse_address(false));
+		//acceptor_->bind(endpoint_);
+		//acceptor_->listen();
+
+		return mCore->StartAccept();
+	}
+	catch (...)
+	{
+		return false;
+	}
+	return false;
+}
+
+void TCPServer::Stop()
+{
+	try
+	{
+		std::lock_guard<std::mutex> guard(mCore->mutex);
+		mCore->acceptor_->cancel();
+		for (auto & pair : mCore->sessions)
+		{
+			pair.second->Close();
+		}
+	}
+	catch (...)
+	{
+	}
+}
+
+int TCPServer::Send(uint connID, const void *data, size_t len)
+{
+	try
+	{
+		std::lock_guard<std::mutex> guard(mCore->mutex);
+		auto iter = mCore->sessions.find(connID);
+		if (iter == mCore->sessions.end()) return 0;
+		return iter->second->Send(data, len);
+	}
+	catch (...)
+	{
+		return 0;
+	}
+}
+
+bool TCPServer::Close(uint connID)
+{
+	return mCore->Close(connID);
+}
 
 void TCPServer::SetTCPNoDelay(bool val)
 {
-	mCore->tcp_nodelay = val;
+	mCore->share.tcp_nodelay = val;
 }
 
 void TCPServer::SetSendBufSize(uint val)
 {
-	mCore->send_buffer_size = val;
+	mCore->share.send_buffer_size = val;
 }
 
 void TCPServer::SetRecvBufSize(uint val)
 {
-	mCore->recv_buffer_size = val;
+	mCore->share.recv_buffer_size = val;
 }
 
 bool TCPServer::GetTCPNoDelay()
 {
-	return mCore->tcp_nodelay;
+	return mCore->share.tcp_nodelay;
 }
 
 uint TCPServer::GetSendBufSize()
 {
-	return mCore->send_buffer_size;
+	return mCore->share.send_buffer_size;
 }
 
 uint TCPServer::GetRecvBufSize()
 {
-	return mCore->recv_buffer_size;
+	return mCore->share.recv_buffer_size;
 }

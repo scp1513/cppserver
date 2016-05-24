@@ -5,12 +5,10 @@
 #include <functional>
 #include <memory>
 #include <chrono>
-#include <ctime>
 
 class Serial
 {
 public:
-	struct Core;
 	typedef std::function<void(uint)> TimerHandler;
 	typedef std::function<void(void)> PostHandler;
 
@@ -24,23 +22,20 @@ public:
 
 	void Post(const PostHandler& handler);
 
-	uint AddTimer(uint millisec, const TimerHandler& handler);
-
 	uint AddTimer(const std::chrono::system_clock::duration& duration, const TimerHandler& handler);
+
+	uint AddTimer(uint millisec, const TimerHandler& handler) { return AddTimer(std::chrono::milliseconds(millisec), handler); }
 
 	uint Expire(const std::chrono::system_clock::duration& duration, const TimerHandler& handler);
 
-	uint Expire(uint millisec, const TimerHandler& handler);
+	uint Expire(uint millisec, const TimerHandler& handler) { return Expire(std::chrono::milliseconds(millisec), handler); }
 
 	uint ExpireAt(const std::chrono::system_clock::time_point& time, const TimerHandler& handler);
-
-	uint ExpireAt(const std::tm& tm, const TimerHandler& handler);
-
-	uint ExpireAt(const std::time_t& t, const TimerHandler& handler);
 
 	void RemoveTimer(uint timerID);
 
 private:
+	struct Core;
 	std::shared_ptr<Core> mCore;
 };
 
